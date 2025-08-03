@@ -243,7 +243,9 @@ impl<T: BaseFloat> Environment<T> {
         Some((self.mid_throat_exit(correct_side_qv1), time_bound - dt))
     }
     fn halfthroat_step(&self, throat_patch_ray: SituatedQV3<T>, dt: T) -> SituatedQV3<T> {
-        let (hti, _) = throat_patch_ray.chart_index.throat_indices().unwrap();
+        let ChartIndex::HalfThroat(hti, _) = throat_patch_ray.chart_index else {
+            panic!()
+        };
         let ht = &self.half_throats[hti.0];
         let mesh = &self.meshes[ht.mesh_index];
         let k1 = mesh.phase_vel(throat_patch_ray);
@@ -261,7 +263,7 @@ impl<T: BaseFloat> Environment<T> {
         let v1_old_tri = throat_patch_ray.vel + k1.vel * dt;
         let v1_uv_rotated = rot.rotate_vector(v1_old_tri.truncate());
         let v1 = v1_uv_rotated.extend(v1_old_tri.z);
-        let (_, new_hei) = mesh_quasi_qv1.chart_index.throat_indices().unwrap();
+        let ChartIndex::MeshLocal2DTriangle(_, new_hei) = mesh_quasi_qv1.chart_index else {panic!()};
         let prelim = SituatedQV3 {
             chart_index: ChartIndex::HalfThroat(hti, new_hei),
             pos: q1,
@@ -862,7 +864,9 @@ impl<T: BaseFloat> Mesh<T> {
         }
     }
     fn phase_vel(&self, ray: SituatedQV3<T>) -> SituatedQV3<T> {
-        let (_, hei) = ray.chart_index.throat_indices().unwrap();
+        let ChartIndex::HalfThroat(_, hei) = ray.chart_index else {
+            panic!()
+        };
         let he = self.half_edges[hei.0];
         let djdt = self.djac_dt(he, ray.pos, ray.vel);
         let jpinv = self.jac_pinv(he, ray.pos);
