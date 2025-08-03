@@ -7,7 +7,10 @@ use std::{
 };
 
 use cgmath::{
-    num_traits::{clamp, clamp_max, Float}, vec2, vec3, vec4, BaseFloat, BaseNum, Basis2, Basis3, InnerSpace, Matrix, Matrix2, Matrix3, Matrix4, Rad, Rotation, Rotation2, Rotation3, SquareMatrix, Vector2, Vector3, Vector4, VectorSpace, Zero
+    BaseFloat, BaseNum, Basis2, Basis3, InnerSpace, Matrix, Matrix2, Matrix3, Matrix4, Rad,
+    Rotation, Rotation2, Rotation3, SquareMatrix, Vector2, Vector3, Vector4, VectorSpace, Zero,
+    num_traits::{Float, clamp, clamp_max},
+    vec2, vec3, vec4,
 };
 use image::{ImageError, Pixel, Rgba, RgbaImage};
 
@@ -278,11 +281,14 @@ impl<T: BaseFloat> Environment<T> {
         time_bound: T,
         dt: T,
     ) -> Option<(SituatedQV3<T>, T)> {
-        let cdt = clamp_max(dt, time_bound);
         match ray.chart_index {
             ChartIndex::Ambient(_) => Some((self.process_ambient_ray(ray), time_bound)),
             ChartIndex::HalfThroat(_, _) => {
-                Some((self.halfthroat_step(ray, cdt), time_bound - cdt))
+                if dt >= time_bound {
+                    None
+                } else {
+                    Some((self.halfthroat_step(ray, dt), time_bound - dt))
+                }
             }
             ChartIndex::MidThroat(_, _) => self.midthroat_traverse(ray, time_bound),
             _ => panic!(),
@@ -309,7 +315,9 @@ impl<T: BaseFloat> Environment<T> {
         Some(cur_ray)
     }
     fn ray_color(&self, ray: SituatedQV3<T>) -> Option<Rgba<u8>> {
-        let ChartIndex::Ambient(ai) = ray.chart_index else {return None};
+        let ChartIndex::Ambient(ai) = ray.chart_index else {
+            return None;
+        };
         Some(self.ambients[ai].background.sample(ray.vel))
     }
 }
@@ -1072,15 +1080,17 @@ fn main() {
             half_throat_indices: vec![],
         }],
     };
-    let (width, height) = (728, 728);
-    let rot = Basis3::from_axis_angle(vec3(1.0, 0.0, 0.0), Rad(PI/2.0));
+    let (width, height) = (768, 768);
+    let rot = Basis3::from_axis_angle(vec3(1.0, 0.0, 0.0), Rad(PI / 2.0));
     let mrot = Matrix3::from(rot);
+    let view_dir = vec3(-1.0, -1.0, 1.0).normalize();
+    let persp = Matrix3::look_to_lh(view_dir, vec3(0.0, 1.0, 0.0)).transpose();
     let camera = Camera::<f64> {
         width: width as f64,
         height: height as f64,
-        frame: Matrix3::identity(),
-        frame_inv: Matrix3::identity(),
-        centre: vec3(0.0, 0.0, -4.0),
+        frame: persp,
+        frame_inv: persp.invert().unwrap(),
+        centre: vec3(2.0, 2.0, -2.0),
         yfov: PI / 3.0,
         chart_index: ChartIndex::Ambient(0),
     };
@@ -1090,9 +1100,9 @@ fn main() {
         for y in 0..height {
             let fragpos = vec2(x as f64 + 0.5, y as f64 + 0.5);
             let fragray = camera.fragpos_to_ray(fragpos);
-            let pushed_ray = tet_env.push_ray(fragray, 50.0, 300, 0.02);
+            let pushed_ray = tet_env.push_ray(fragray, 50.0, 300, 0.01);
             let color = match pushed_ray {
-                Some(qv) => tet_env.ray_color(qv).unwrap_or(Rgba([0u8,0,0,255])),
+                Some(qv) => tet_env.ray_color(qv).unwrap_or(Rgba([0u8, 0, 0, 255])),
                 None => Rgba([0u8, 0, 0, 255]),
             };
             *res_image.get_pixel_mut(x, y) = color;
