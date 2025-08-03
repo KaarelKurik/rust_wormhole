@@ -674,7 +674,7 @@ impl<T: BaseFloat> Mesh<T> {
         let e2 = prev.vertex - he.vertex;
         let base_length = e1.magnitude();
         let p1 = Vector2::new(base_length, T::zero());
-        let p2 = Vector2::new(e1.cross(e2).z, e1.dot(e2)) / base_length;
+        let p2 = Vector2::new(e1.dot(e2), e1.cross(e2).z) / base_length;
         [Vector2::zero(), p1, p2]
     }
     fn half_edge_to_vertices(&self, he: HalfEdge<T>) -> [Vector3<T>; 3] {
