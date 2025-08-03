@@ -1,10 +1,15 @@
 use core::panic;
-use std::{ops::{Deref, Index, IndexMut, Mul, Neg}, path::Path};
+use std::{
+    cmp::max,
+    f64::consts::PI,
+    ops::{Deref, Index, IndexMut, Mul, Neg},
+    path::Path,
+};
 
 use cgmath::{
-    num_traits::{clamp, clamp_max, Float}, vec2, vec3, vec4, BaseFloat, BaseNum, Basis2, InnerSpace, Matrix, Matrix2, Matrix3, Matrix4, Rotation, Rotation2, Vector2, Vector3, Vector4, VectorSpace, Zero
+    num_traits::{clamp, clamp_max, Float}, vec2, vec3, vec4, BaseFloat, BaseNum, Basis2, Basis3, InnerSpace, Matrix, Matrix2, Matrix3, Matrix4, Rad, Rotation, Rotation2, Rotation3, SquareMatrix, Vector2, Vector3, Vector4, VectorSpace, Zero
 };
-use image::{ImageError, RgbaImage};
+use image::{ImageError, Pixel, Rgba, RgbaImage};
 
 #[derive(Debug, Clone, Copy)]
 struct HalfEdge<T: Float> {
@@ -38,7 +43,6 @@ impl Deref for HalfThroatIndex {
 }
 
 struct Mesh<T: Float> {
-    index: usize,
     half_edges: Vec<HalfEdge<T>>,
 }
 
@@ -52,6 +56,7 @@ impl<T: Float> Index<HalfEdgeIndex> for Mesh<T> {
 
 struct Ambient {
     half_throat_indices: Vec<usize>,
+    background: RgbaSkybox,
 }
 
 struct Environment<T: Float> {
@@ -82,7 +87,7 @@ impl<T: BaseFloat> Environment<T> {
             let throat_local_pos = (ht.gtl * ray.pos.extend(T::one())).truncate();
             let throat_local_vel = (ht.gtl * ray.vel.extend(T::zero())).truncate();
 
-            let mesh = &self.meshes[ht.index];
+            let mesh = &self.meshes[ht.mesh_index];
             let Some(mi) = mesh.intersect_ray(throat_local_pos, throat_local_vel) else {
                 continue;
             };
@@ -125,7 +130,10 @@ impl<T: BaseFloat> Environment<T> {
         let local_pos = (local_verts[1] * tuv.y + local_verts[2] * tuv.z).extend(T::zero());
         let local_vel = mesh.jac_pinv(he, local_pos) * throat_local_4vel;
         SituatedQV3 {
-            chart_index: ChartIndex::HalfThroat(HalfThroatIndex(ht.index), HalfEdgeIndex(he.index)),
+            chart_index: ChartIndex::HalfThroat(
+                HalfThroatIndex(hti.half_throat_index),
+                HalfEdgeIndex(he.index),
+            ),
             pos: local_pos,
             vel: local_vel,
         }
@@ -217,15 +225,19 @@ impl<T: BaseFloat> Environment<T> {
         let v1 = mesh_qv1.vel.extend(throat_patch_ray.vel.z);
         let (mesh_qv1_hti, mesh_qv1_hei) = match mesh_qv1.chart_index {
             ChartIndex::MeshLocal2DTriangle(hti, hei) => (hti, hei),
-            _ => panic!()
+            _ => panic!(),
         };
         let qv1 = SituatedQV3 {
             chart_index: ChartIndex::MidThroat(mesh_qv1_hti, mesh_qv1_hei),
             pos: q1,
             vel: v1,
         };
-        let correct_side_qv1 = if qv1.vel.z.is_sign_positive() {self.mid_throat_transition(qv1)} else {qv1};
-        Some((self.mid_throat_exit(correct_side_qv1), time_bound-dt))
+        let correct_side_qv1 = if qv1.vel.z.is_sign_positive() {
+            self.mid_throat_transition(qv1)
+        } else {
+            qv1
+        };
+        Some((self.mid_throat_exit(correct_side_qv1), time_bound - dt))
     }
     fn halfthroat_step(&self, throat_patch_ray: SituatedQV3<T>, dt: T) -> SituatedQV3<T> {
         let (hti, _) = throat_patch_ray.chart_index.throat_indices().unwrap();
@@ -240,34 +252,54 @@ impl<T: BaseFloat> Environment<T> {
         let mesh_quasi_qv0 = mesh.project_uvt_to_mesh(quasi_qv0);
         let mesh_quasi_qv1 = mesh.exp(mesh_quasi_qv0, dt);
         let rot = Basis2::from_angle(mesh_quasi_qv0.vel.angle(mesh_quasi_qv1.vel));
-        let q1 = mesh_quasi_qv1.pos.extend(throat_patch_ray.pos.z + k1.pos.z * dt);
+        let q1 = mesh_quasi_qv1
+            .pos
+            .extend(throat_patch_ray.pos.z + k1.pos.z * dt);
         let v1_old_tri = throat_patch_ray.vel + k1.vel * dt;
         let v1_uv_rotated = rot.rotate_vector(v1_old_tri.truncate());
         let v1 = v1_uv_rotated.extend(v1_old_tri.z);
         let (_, new_hei) = mesh_quasi_qv1.chart_index.throat_indices().unwrap();
-        let prelim = SituatedQV3 { chart_index: ChartIndex::HalfThroat(hti, new_hei), pos: q1, vel: v1 };
+        let prelim = SituatedQV3 {
+            chart_index: ChartIndex::HalfThroat(hti, new_hei),
+            pos: q1,
+            vel: v1,
+        };
         if prelim.pos.z > ht.throat_to_mid_t {
             self.mid_throat_entry(prelim)
         } else if prelim.pos.z.is_sign_negative() {
-            self.mid_throat_exit(prelim)
+            self.half_throat_exit(prelim)
         } else {
             prelim
         }
     }
-    fn push_ray_step(&self, ray: SituatedQV3<T>, time_bound: T, dt: T) -> Option<(SituatedQV3<T>, T)> {
+    fn push_ray_step(
+        &self,
+        ray: SituatedQV3<T>,
+        time_bound: T,
+        dt: T,
+    ) -> Option<(SituatedQV3<T>, T)> {
         let cdt = clamp_max(dt, time_bound);
         match ray.chart_index {
             ChartIndex::Ambient(_) => Some((self.process_ambient_ray(ray), time_bound)),
-            ChartIndex::HalfThroat(_, _) => Some((self.halfthroat_step(ray, cdt), time_bound - cdt)),
+            ChartIndex::HalfThroat(_, _) => {
+                Some((self.halfthroat_step(ray, cdt), time_bound - cdt))
+            }
             ChartIndex::MidThroat(_, _) => self.midthroat_traverse(ray, time_bound),
             _ => panic!(),
         }
     }
-    fn push_ray(&self, ray: SituatedQV3<T>, time_bound: T, iter_bound: u32, dt: T) -> Option<SituatedQV3<T>> {
+    fn push_ray(
+        &self,
+        ray: SituatedQV3<T>,
+        time_bound: T,
+        iter_bound: u32,
+        dt: T,
+    ) -> Option<SituatedQV3<T>> {
         let mut cur_ray = ray;
         let mut cur_time_remaining = time_bound;
         for _ in 0..iter_bound {
-            let (new_ray, new_time_remaining) = self.push_ray_step(cur_ray, cur_time_remaining, dt)?;
+            let (new_ray, new_time_remaining) =
+                self.push_ray_step(cur_ray, cur_time_remaining, dt)?;
             if cur_ray == new_ray {
                 return Some(cur_ray);
             }
@@ -275,6 +307,10 @@ impl<T: BaseFloat> Environment<T> {
             cur_ray = new_ray;
         }
         Some(cur_ray)
+    }
+    fn ray_color(&self, ray: SituatedQV3<T>) -> Option<Rgba<u8>> {
+        let ChartIndex::Ambient(ai) = ray.chart_index else {return None};
+        Some(self.ambients[ai].background.sample(ray.vel))
     }
 }
 
@@ -292,9 +328,15 @@ impl ChartIndex {
     fn throat_indices(self) -> Option<(HalfThroatIndex, HalfEdgeIndex)> {
         match self {
             ChartIndex::Ambient(_) => None,
-            ChartIndex::HalfThroat(half_throat_index, half_edge_index) => Some((half_throat_index, half_edge_index)),
-            ChartIndex::MidThroat(half_throat_index, half_edge_index) => Some((half_throat_index, half_edge_index)),
-            ChartIndex::MeshLocal2DTriangle(half_throat_index, half_edge_index) => Some((half_throat_index, half_edge_index)),
+            ChartIndex::HalfThroat(half_throat_index, half_edge_index) => {
+                Some((half_throat_index, half_edge_index))
+            }
+            ChartIndex::MidThroat(half_throat_index, half_edge_index) => {
+                Some((half_throat_index, half_edge_index))
+            }
+            ChartIndex::MeshLocal2DTriangle(half_throat_index, half_edge_index) => {
+                Some((half_throat_index, half_edge_index))
+            }
         }
     }
 }
@@ -338,10 +380,8 @@ struct HalfThroat<T: Float> {
     ambient_index: usize,
     gtl: Matrix4<T>,
     ltg: Matrix4<T>,
-    mid_t: T,
-    hi_t: T,
-    throat_to_mid_t: T,
-    mid_to_throat_t: T,
+    mid_t: T,           // other side must have same mid_t
+    throat_to_mid_t: T, // mid_t > throat_to_mid_t > 1
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -806,7 +846,7 @@ impl<T: BaseFloat> Mesh<T> {
             ChartIndex::MidThroat(hti, hei) => (hti, hei),
             _ => panic!(),
         };
-        let chart_index = ChartIndex::MidThroat(hti, hei);
+        let chart_index = ChartIndex::MeshLocal2DTriangle(hti, hei);
         SituatedQV2 {
             chart_index,
             pos: throat_patch_ray.pos.truncate(),
@@ -818,11 +858,16 @@ impl<T: BaseFloat> Mesh<T> {
         let he = self.half_edges[hei.0];
         let djdt = self.djac_dt(he, ray.pos, ray.vel);
         let jpinv = self.jac_pinv(he, ray.pos);
-        SituatedQV3 { chart_index: ray.chart_index, pos: ray.vel, vel: -(jpinv * (djdt * ray.vel)) }
+        SituatedQV3 {
+            chart_index: ray.chart_index,
+            pos: ray.vel,
+            vel: -(jpinv * (djdt * ray.vel)),
+        }
     }
 }
 
 // Has to have equal resolution on all faces
+#[derive(Debug, Clone)]
 struct RgbaSkybox {
     px: RgbaImage,
     nx: RgbaImage,
@@ -837,7 +882,7 @@ impl RgbaSkybox {
         let [px, nx, py, ny, pz, nz]: [Result<_, ImageError>; 6] =
             ["right", "left", "bottom", "top", "front", "back"].map(|x| {
                 let mut im = image::open(bg_path.join(format!("{}.png", x)))?.into_rgba8();
-                image::imageops::flip_vertical_in_place(&mut im);
+                // image::imageops::flip_vertical_in_place(&mut im);
                 Ok(im)
             });
         Ok(RgbaSkybox {
@@ -849,9 +894,209 @@ impl RgbaSkybox {
             nz: nz?,
         })
     }
+    fn sample<T: BaseFloat>(&self, ray: Vector3<T>) -> Rgba<u8> {
+        let abs_ray = ray.map(|x| x.abs());
+        let inf_mag = abs_ray.x.max(abs_ray.y.max(abs_ray.z));
+        let n = ray / inf_mag;
+        let (x, y, image) = if abs_ray.x == inf_mag {
+            if n.x.is_sign_positive() {
+                (-n.z, n.y, &self.px)
+            } else {
+                (n.z, n.y, &self.nx)
+            }
+        } else if abs_ray.y == inf_mag {
+            if n.y.is_sign_positive() {
+                (n.x, -n.z, &self.py)
+            } else {
+                (n.x, n.z, &self.ny)
+            }
+        } else {
+            if n.z.is_sign_positive() {
+                (n.x, n.y, &self.pz)
+            } else {
+                (-n.x, n.y, &self.nz)
+            }
+        };
+        let half = T::from(0.5).unwrap();
+        let pixel_x = ((x + T::one()) * half * T::from(image.width()).unwrap())
+            .floor()
+            .to_u32()
+            .unwrap()
+            .clamp(0, image.width() - 1);
+        let pixel_y = ((y + T::one()) * half * T::from(image.height()).unwrap())
+            .floor()
+            .to_u32()
+            .unwrap()
+            .clamp(0, image.height() - 1);
+        let pixel = image.get_pixel(pixel_x, pixel_y);
+        *pixel
+    }
+}
 
+fn tetrahedron() -> Vec<HalfEdge<f64>> {
+    let verts = [
+        Vector3::new(1.0, 1.0, 1.0),
+        Vector3::new(1.0, -1.0, -1.0),
+        Vector3::new(-1.0, 1.0, -1.0),
+        Vector3::new(-1.0, -1.0, 1.0),
+    ];
+    let faces = [[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]];
+
+    let mut half_edges = Vec::with_capacity(12);
+
+    // Create half-edges for each face
+    for face_idx in 0..4 {
+        let face = faces[face_idx];
+        let base_he_idx = face_idx * 3;
+
+        for i in 0..3 {
+            let he_idx = base_he_idx + i;
+            let next_idx = base_he_idx + ((i + 1) % 3);
+            let prev_idx = base_he_idx + ((i + 2) % 3);
+
+            half_edges.push(HalfEdge {
+                index: he_idx,
+                prev: prev_idx,
+                next: next_idx,
+                twin: 0, // Will be set below
+                vertex: verts[face[i]],
+            });
+        }
+    }
+
+    // Set up twin relationships
+    let twins = [
+        (0, 5),
+        (1, 11),
+        (2, 6),
+        (3, 8),
+        (4, 9),
+        (5, 0),
+        (6, 2),
+        (7, 10),
+        (8, 3),
+        (9, 4),
+        (10, 7),
+        (11, 1),
+    ];
+
+    for (he_idx, twin_idx) in twins {
+        half_edges[he_idx].twin = twin_idx;
+    }
+
+    half_edges
+}
+
+struct Camera<T: Float> {
+    width: T,
+    height: T,
+    frame: Matrix3<T>,
+    frame_inv: Matrix3<T>,
+    centre: Vector3<T>,
+    yfov: T,
+    chart_index: ChartIndex,
+}
+
+impl<T: BaseFloat> Camera<T> {
+    fn fragpos_to_ray(&self, pos: Vector2<T>) -> SituatedQV3<T> {
+        let half = T::from(0.5).unwrap();
+        let ray_coords = vec3(
+            (pos.x / self.width - half) * (self.width / self.height),
+            pos.y / self.height - half,
+            half / (half * self.yfov).tan(),
+        )
+        .normalize();
+        let ray = self.frame * ray_coords;
+        SituatedQV3 {
+            chart_index: self.chart_index,
+            pos: self.centre,
+            vel: ray,
+        }
+    }
+    fn fragrays(&self) -> impl Iterator<Item = SituatedQV3<T>> {
+        let iw = self.width.to_u32().unwrap();
+        let ih = self.height.to_u32().unwrap();
+        let w = (0..iw)
+            .flat_map(move |x| (0..ih).map(move |y| (x, y)))
+            .map(|(x, y)| vec2(T::from(x).unwrap(), T::from(y).unwrap()))
+            .map(|fragpos| self.fragpos_to_ray(fragpos));
+        w
+    }
 }
 
 fn main() {
+    let bg0 = RgbaSkybox::load_from_path(Path::new("textures/bg_debug")).unwrap();
+    let bg1 = RgbaSkybox::load_from_path(Path::new("textures/bg0")).unwrap();
+    let tet_edges = tetrahedron();
+    let tet_mesh = Mesh {
+        half_edges: tet_edges,
+    };
+    let ht0 = HalfThroat::<f64> {
+        index: 0,
+        twin_index: 1,
+        mesh_index: 0,
+        ambient_index: 0,
+        gtl: Matrix4::identity(),
+        ltg: Matrix4::identity(),
+        mid_t: 2.0,
+        throat_to_mid_t: 1.1,
+    };
+    let ht1 = HalfThroat::<f64> {
+        index: 1,
+        twin_index: 0,
+        mesh_index: 0,
+        ambient_index: 1,
+        gtl: Matrix4::identity(),
+        ltg: Matrix4::identity(),
+        mid_t: 2.0,
+        throat_to_mid_t: 1.1,
+    };
+    let a0 = Ambient {
+        half_throat_indices: vec![0],
+        background: bg0.clone(),
+    };
+    let a1 = Ambient {
+        half_throat_indices: vec![1],
+        background: bg1,
+    };
+    let tet_env = Environment {
+        meshes: vec![tet_mesh],
+        half_throats: vec![ht0, ht1],
+        ambients: vec![a0, a1],
+    };
+    let empty_env = Environment::<f64> {
+        meshes: vec![],
+        half_throats: vec![],
+        ambients: vec![Ambient {
+            background: bg0.clone(),
+            half_throat_indices: vec![],
+        }],
+    };
+    let (width, height) = (728, 728);
+    let rot = Basis3::from_axis_angle(vec3(1.0, 0.0, 0.0), Rad(PI/2.0));
+    let mrot = Matrix3::from(rot);
+    let camera = Camera::<f64> {
+        width: width as f64,
+        height: height as f64,
+        frame: Matrix3::identity(),
+        frame_inv: Matrix3::identity(),
+        centre: vec3(0.0, 0.0, -4.0),
+        yfov: PI / 3.0,
+        chart_index: ChartIndex::Ambient(0),
+    };
+    let mut res_image = RgbaImage::new(width, height);
     println!("Hello, world!");
+    for x in 0..width {
+        for y in 0..height {
+            let fragpos = vec2(x as f64 + 0.5, y as f64 + 0.5);
+            let fragray = camera.fragpos_to_ray(fragpos);
+            let pushed_ray = tet_env.push_ray(fragray, 50.0, 300, 0.02);
+            let color = match pushed_ray {
+                Some(qv) => tet_env.ray_color(qv).unwrap_or(Rgba([0u8,0,0,255])),
+                None => Rgba([0u8, 0, 0, 255]),
+            };
+            *res_image.get_pixel_mut(x, y) = color;
+        }
+    }
+    res_image.save("wowee.png").unwrap();
 }
