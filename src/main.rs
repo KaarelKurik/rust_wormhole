@@ -45,6 +45,7 @@ impl Deref for HalfThroatIndex {
     }
 }
 
+#[derive(Debug, Clone)]
 struct Mesh<T: Float> {
     half_edges: Vec<HalfEdge<T>>,
 }
@@ -674,7 +675,7 @@ impl<T: BaseFloat> Mesh<T> {
         let e2 = prev.vertex - he.vertex;
         let base_length = e1.magnitude();
         let p1 = Vector2::new(base_length, T::zero());
-        let p2 = Vector2::new(e1.dot(e2), e1.cross(e2).z) / base_length;
+        let p2 = Vector2::new(e1.dot(e2), e1.cross(e2).magnitude()) / base_length;
         [Vector2::zero(), p1, p2]
     }
     fn half_edge_to_vertices(&self, he: HalfEdge<T>) -> [Vector3<T>; 3] {
@@ -693,30 +694,10 @@ impl<T: BaseFloat> Mesh<T> {
         let e2 = (d2 - d2.project_on(e1)).normalize();
         let e3 = e1.cross(e2);
         Matrix4 {
-            x: Vector4 {
-                x: e1.x,
-                y: e1.y,
-                z: e1.z,
-                w: T::zero(),
-            },
-            y: Vector4 {
-                x: e2.x,
-                y: e2.y,
-                z: e2.z,
-                w: T::zero(),
-            },
-            z: Vector4 {
-                x: e3.x,
-                y: e3.y,
-                z: e3.z,
-                w: T::zero(),
-            },
-            w: Vector4 {
-                x: he.vertex.x,
-                y: he.vertex.y,
-                z: he.vertex.z,
-                w: T::one(),
-            },
+            x: e1.extend(T::zero()),
+            y: e2.extend(T::zero()),
+            z: e3.extend(T::zero()),
+            w: he.vertex.extend(T::one()),
         }
     }
     fn exp(&self, qv: SituatedQV2<T>, dt: T) -> SituatedQV2<T> {
@@ -735,8 +716,8 @@ impl<T: BaseFloat> Mesh<T> {
             self.twin_half_edge(self.prev_half_edge(half_edge)),
         ];
         let (q, v) = (qv.pos, qv.vel);
-        for i in 0..3 {
-            let (a, b) = (verts[i], verts[(i + 1) % 3]);
+        for i in 1..4 {
+            let (a, b) = (verts[i % 3], verts[(i + 1) % 3]);
             let sect = ray_segment_intersection(q, v, a, b);
             let Some((lambda, l)) = sect else { continue };
             if lambda > dt {
@@ -746,7 +727,7 @@ impl<T: BaseFloat> Mesh<T> {
             let new_v = Vector2::new(nx.dot(v), nx.perp_dot(v));
             let new_q = Vector2::new((T::one() - l) * nx.dot(a - b), T::zero());
             let new_index =
-                ChartIndex::MeshLocal2DTriangle(half_throat_index, HalfEdgeIndex(twins[i].index));
+                ChartIndex::MeshLocal2DTriangle(half_throat_index, HalfEdgeIndex(twins[i % 3].index));
             let new_sqv = SituatedQV2 {
                 chart_index: new_index,
                 pos: new_q,
@@ -1072,7 +1053,7 @@ fn main() {
         background: bg1,
     };
     let tet_env = Environment {
-        meshes: vec![tet_mesh],
+        meshes: vec![tet_mesh.clone()],
         half_throats: vec![ht0, ht1],
         ambients: vec![a0, a1],
     };
@@ -1100,6 +1081,10 @@ fn main() {
     };
     let mut res_image = RgbaImage::new(width, height);
     println!("Hello, world!");
+    // let central_fragpos = vec2((width as f64)/2.0, (height as f64)/2.0);
+    // let fragray = camera.fragpos_to_ray(central_fragpos);
+    // let pushed_ray = tet_env.push_ray(fragray, 50.0, 0, 0.01);
+    // print!("{:?}", pushed_ray);
     for x in 0..width {
         for y in 0..height {
             let fragpos = vec2(x as f64 + 0.5, y as f64 + 0.5);
