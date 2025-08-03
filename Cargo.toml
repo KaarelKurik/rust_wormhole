@@ -1,0 +1,8 @@
+[package]
+name = "rust_wormhole"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cgmath = "0.18.0"
+image = "0.25.6"
