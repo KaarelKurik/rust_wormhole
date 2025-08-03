@@ -439,7 +439,7 @@ fn ray_segment_intersection<T: BaseFloat>(
 ) -> Option<(T, T)> {
     let qt = q - a;
     let bt = b - a;
-    let lambda_denom = v.perp_dot(b);
+    let lambda_denom = v.perp_dot(bt);
     if lambda_denom.is_zero() {
         return None;
     }
