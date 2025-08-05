@@ -48,6 +48,7 @@ impl Deref for HalfThroatIndex {
 #[derive(Debug, Clone)]
 struct Mesh<T: Float> {
     half_edges: Vec<HalfEdge<T>>,
+    embedded_bases: Vec<Matrix4<T>>,
 }
 
 impl<T: Float> Index<HalfEdgeIndex> for Mesh<T> {
@@ -249,10 +250,17 @@ impl<T: BaseFloat> Environment<T> {
         };
         let ht = &self.half_throats[hti.0];
         let mesh = &self.meshes[ht.mesh_index];
+        let two = T::from(2).unwrap();
         let k1 = mesh.phase_vel(throat_patch_ray);
+        let m1 = SituatedQV3 {
+            pos: throat_patch_ray.pos + k1.pos * (dt / two),
+            vel: throat_patch_ray.vel + k1.vel * (dt / two),
+            ..throat_patch_ray
+        };
+        let delta_per_dt = mesh.phase_vel(m1);
         let quasi_qv0 = SituatedQV3 {
             pos: throat_patch_ray.pos,
-            vel: k1.pos,
+            vel: delta_per_dt.pos,
             ..throat_patch_ray
         };
         let mesh_quasi_qv0 = mesh.project_uvt_to_mesh(quasi_qv0);
@@ -260,11 +268,13 @@ impl<T: BaseFloat> Environment<T> {
         let rot = Basis2::from_angle(mesh_quasi_qv0.vel.angle(mesh_quasi_qv1.vel));
         let q1 = mesh_quasi_qv1
             .pos
-            .extend(throat_patch_ray.pos.z + k1.pos.z * dt);
-        let v1_old_tri = throat_patch_ray.vel + k1.vel * dt;
+            .extend(throat_patch_ray.pos.z + delta_per_dt.pos.z * dt);
+        let v1_old_tri = throat_patch_ray.vel + delta_per_dt.vel * dt;
         let v1_uv_rotated = rot.rotate_vector(v1_old_tri.truncate());
         let v1 = v1_uv_rotated.extend(v1_old_tri.z);
-        let ChartIndex::MeshLocal2DTriangle(_, new_hei) = mesh_quasi_qv1.chart_index else {panic!()};
+        let ChartIndex::MeshLocal2DTriangle(_, new_hei) = mesh_quasi_qv1.chart_index else {
+            panic!()
+        };
         let prelim = SituatedQV3 {
             chart_index: ChartIndex::HalfThroat(hti, new_hei),
             pos: q1,
@@ -686,19 +696,7 @@ impl<T: BaseFloat> Mesh<T> {
         ]
     }
     fn half_edge_to_embedded_basis(&self, he: HalfEdge<T>) -> Matrix4<T> {
-        // maybe should be Affine4 instead
-        let next = self.next_half_edge(he);
-        let prev = self.prev_half_edge(he);
-        let e1 = (next.vertex - he.vertex).normalize();
-        let d2 = prev.vertex - he.vertex;
-        let e2 = (d2 - d2.project_on(e1)).normalize();
-        let e3 = e1.cross(e2);
-        Matrix4 {
-            x: e1.extend(T::zero()),
-            y: e2.extend(T::zero()),
-            z: e3.extend(T::zero()),
-            w: he.vertex.extend(T::one()),
-        }
+        self.embedded_bases[he.index]
     }
     fn exp(&self, qv: SituatedQV2<T>, dt: T) -> SituatedQV2<T> {
         let ChartIndex::MeshLocal2DTriangle(half_throat_index, half_edge_index) = qv.chart_index
@@ -726,8 +724,10 @@ impl<T: BaseFloat> Mesh<T> {
             let nx = (a - b).normalize();
             let new_v = Vector2::new(nx.dot(v), nx.perp_dot(v));
             let new_q = Vector2::new((T::one() - l) * nx.dot(a - b), T::zero());
-            let new_index =
-                ChartIndex::MeshLocal2DTriangle(half_throat_index, HalfEdgeIndex(twins[i % 3].index));
+            let new_index = ChartIndex::MeshLocal2DTriangle(
+                half_throat_index,
+                HalfEdgeIndex(twins[i % 3].index),
+            );
             let new_sqv = SituatedQV2 {
                 chart_index: new_index,
                 pos: new_q,
@@ -1017,11 +1017,33 @@ impl<T: BaseFloat> Camera<T> {
     }
 }
 
+fn half_edges_to_embedded_bases<T: BaseFloat>(hes: &Vec<HalfEdge<T>>) -> Vec<Matrix4<T>> {
+    let mut out = Vec::with_capacity(hes.len());
+    for i in 0..hes.len() {
+        let bot = i - i % 3;
+        let cur = hes[i];
+        let next = hes[bot + (i + 1) % 3];
+        let prev = hes[bot + (i + 2) % 3];
+        let e1 = (next.vertex - cur.vertex).normalize();
+        let d2 = prev.vertex - cur.vertex;
+        let e2 = (d2 - d2.project_on(e1)).normalize();
+        let e3 = e1.cross(e2);
+        out.push(Matrix4 {
+            x: e1.extend(T::zero()),
+            y: e2.extend(T::zero()),
+            z: e3.extend(T::zero()),
+            w: cur.vertex.extend(T::one()),
+        })
+    }
+    out
+}
+
 fn main() {
     let bg0 = RgbaSkybox::load_from_path(Path::new("textures/bg_debug")).unwrap();
     let bg1 = RgbaSkybox::load_from_path(Path::new("textures/bg0")).unwrap();
     let tet_edges = tetrahedron();
     let tet_mesh = Mesh {
+        embedded_bases: half_edges_to_embedded_bases(&tet_edges),
         half_edges: tet_edges,
     };
     let ht0 = HalfThroat::<f64> {
@@ -1068,14 +1090,14 @@ fn main() {
     let (width, height) = (768, 768);
     let rot = Basis3::from_axis_angle(vec3(1.0, 0.0, 0.0), Rad(PI / 2.0));
     let mrot = Matrix3::from(rot);
-    let view_dir = vec3(-1.0, -1.0, 1.0).normalize();
+    let view_dir = vec3(0.0, 0.0, 1.0).normalize();
     let persp = Matrix3::look_to_lh(view_dir, vec3(0.0, 1.0, 0.0)).transpose();
     let camera = Camera::<f64> {
         width: width as f64,
         height: height as f64,
         frame: persp,
         frame_inv: persp.invert().unwrap(),
-        centre: vec3(2.0, 2.0, -2.0),
+        centre: vec3(0.0, 0.0, -5.0),
         yfov: PI / 3.0,
         chart_index: ChartIndex::Ambient(0),
     };
@@ -1089,13 +1111,13 @@ fn main() {
         for y in 0..height {
             let fragpos = vec2(x as f64 + 0.5, y as f64 + 0.5);
             let fragray = camera.fragpos_to_ray(fragpos);
-            let pushed_ray = tet_env.push_ray(fragray, 50.0, 300, 0.01);
+            let pushed_ray = tet_env.push_ray(fragray, 50.0, 800, 0.01);
             let color = match pushed_ray {
-                Some(qv) => tet_env.ray_color(qv).unwrap_or(Rgba([0u8, 0, 0, 255])),
-                None => Rgba([0u8, 0, 0, 255]),
+                Some(qv) => tet_env.ray_color(qv).unwrap_or(Rgba([255u8, 255, 0, 255])),
+                None => Rgba([255u8, 255, 0, 255]),
             };
             *res_image.get_pixel_mut(x, y) = color;
         }
     }
-    res_image.save("wowee.png").unwrap();
+    res_image.save("wowee2.png").unwrap();
 }
